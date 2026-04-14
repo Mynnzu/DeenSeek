@@ -1,0 +1,55 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Cormorant Garamond", serif;
+}
+
+@layer base {
+  body {
+    @apply antialiased;
+  }
+}
+
+.prose {
+  color: inherit;
+  @apply leading-relaxed;
+}
+
+.prose p {
+  @apply mb-4 last:mb-0;
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  @apply font-serif font-semibold text-[#064e3b] mt-6 mb-3 first:mt-0;
+}
+
+.prose h3 {
+  @apply text-lg;
+}
+
+.prose strong {
+  @apply text-[#064e3b] font-bold;
+}
+
+.prose ul, .prose ol {
+  @apply mb-4 pl-6 space-y-2;
+}
+
+.prose ul li {
+  @apply relative;
+}
+
+.prose ul li::before {
+  content: "•";
+  @apply absolute -left-5 text-[#d97706] font-bold;
+}
+
+.prose blockquote {
+  @apply border-l-4 border-[#d97706]/30 pl-4 py-1 my-4 italic text-[#4b5563] bg-[#fffbeb]/50 rounded-r-lg;
+}
+
+.prose hr {
+  @apply my-6 border-[#e5e5e0];
+}
