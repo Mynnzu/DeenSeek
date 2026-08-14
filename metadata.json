@@ -1,5 +1,5 @@
 {
   "name": "DeenSeek",
   "description": "An ethical, Shariah-compliant AI chatbot that provides verified Islamic knowledge and fatwa summaries with full traceability.",
-  "requestFramePermissions": []
+  "requestFramePermissions": ["geolocation"]
 }

@@ -1,48 +1,93 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, User, Bot, Info, ShieldCheck, BookOpen, AlertTriangle, Download, Trash2, Menu, X, MessageSquare, Plus, ExternalLink, Search, Book, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { Send, User as UserIcon, Bot, Info, ShieldCheck, BookOpen, AlertTriangle, Download, Trash2, Menu, X, MessageSquare, Plus, ExternalLink, Search, Book, ThumbsUp, ThumbsDown, Archive, RotateCcw, Clock, Sparkles, Eye, EyeOff, LogIn, LogOut, Cloud, CloudOff } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { cn } from '@/src/lib/utils';
-import { chatWithDeenSeek, Message } from '@/src/services/geminiService';
+import { chatWithDeenSeek, Message, generateChatTitle, generateTermRelevance } from '@/src/services/geminiService';
 import { glossaryData, GlossaryTerm } from '@/src/constants/glossaryData';
+import { PrayerTimesCard } from './PrayerTimes';
+import { CitationBadge } from './CitationBadge';
+import { CitationModal } from './CitationModal';
+import { CitationInfo } from '../constants/citationData';
+import { AuthModal } from './AuthModal';
+import { 
+  auth, 
+  firebaseSignOut, 
+  onAuthStateChanged, 
+  User, 
+  saveChatSession, 
+  saveChatMessage, 
+  deleteChatSession, 
+  subscribeToUserSessions, 
+  subscribeToSessionMessages 
+} from '../lib/firebase';
 
 interface ChatSession {
   id: string;
   title: string;
   messages: Message[];
   timestamp: number;
+  isArchived?: boolean;
 }
 
-const linkifyCitations = (text: string) => {
-  // Quran: [Quran Surah:Ayah] -> [Quran Surah:Ayah](https://quran.com/surah/ayah)
-  let processed = text.replace(/\[Quran (\d+):(\d+)\]/g, (match, surah, ayah) => {
-    return `[${match}](https://quran.com/${surah}/${ayah})`;
+const linkifyCitations = (text: string | undefined, dynamicTerms?: GlossaryTerm[]) => {
+  if (!text) return '';
+  
+  // 1. Quran citations: [Quran 2:183], [Quran Surah:Ayah], [Quran 2:183-185]
+  let processed = text.replace(/\[Quran\s+(\d+):(\d+)(?:-(\d+))?\]/gi, (match, surah, ayah, endAyah) => {
+    const ref = endAyah ? `${surah}:${ayah}-${endAyah}` : `${surah}:${ayah}`;
+    const url = `https://quran.com/${surah}/${ayah}`;
+    const cleanLabel = match.replace(/^\[|\]$/g, '');
+    return `[${cleanLabel}](cite:quran:${ref}|${url})`;
   });
 
-  // Bukhari: [Bukhari Number] -> [Bukhari Number](https://sunnah.com/bukhari:number)
-  processed = processed.replace(/\[Bukhari (\d+)\]/g, (match, num) => {
-    return `[${match}](https://sunnah.com/bukhari:${num})`;
-  });
+  // 2. Hadith collections: [Bukhari 1], [Muslim 123], [Tirmidhi 2606], [Abu Dawud 456], etc.
+  const collections = [
+    'Bukhari', 'Muslim', 'Tirmidhi', 'Abu Dawud', 'Abu Dawood', 'Nasai', "Nasa'i",
+    'Ibn Majah', 'Muwatta', 'Riyad as-Salihin'
+  ];
+  const hadithRegex = new RegExp(`\\[(${collections.join('|')})\\s+(\\d+)\\]`, 'gi');
 
-  // Muslim: [Muslim Number] -> [Muslim Number](https://sunnah.com/muslim:number)
-  processed = processed.replace(/\[Muslim (\d+)\]/g, (match, num) => {
-    return `[${match}](https://sunnah.com/muslim:${num})`;
+  processed = processed.replace(hadithRegex, (match, collection, num) => {
+    let key = collection.toLowerCase().replace(/['\s]/g, '');
+    if (key === 'abudawood') key = 'abudawud';
+    if (key === 'nasai') key = 'nasai';
+    const url = `https://sunnah.com/${key}:${num}`;
+    const cleanLabel = match.replace(/^\[|\]$/g, '');
+    return `[${cleanLabel}](cite:hadith:${collection}:${num}|${url})`;
   });
 
   // Glossary Terms: Find terms and wrap them in glossary links
-  // Sort terms by length descending to avoid partial matches (e.g., "Fiqh" before "Fiqh scholar")
-  const sortedTerms = [...glossaryData].sort((a, b) => b.term.length - a.term.length);
+  const allTerms = [...glossaryData, ...(dynamicTerms || [])];
+  // Sort terms by length descending to avoid partial matches
+  const sortedTerms = [...allTerms].sort((a, b) => b.term.length - a.term.length);
   
-  sortedTerms.forEach(item => {
-    // Use word boundaries to avoid matching inside other words
-    const regex = new RegExp(`\\b(${item.term})\\b`, 'gi');
-    // Only replace if not already inside a markdown link or citation
-    // This is a simple check, could be more robust
-    processed = processed.replace(regex, (match) => {
-      // Check if the match is already part of a markdown link [text](url)
-      // We'll use a simple heuristic: if it's preceded by '[' or followed by ']', we skip
-      return `[${match}](glossary:${item.term})`;
-    });
+  // Build dynamic patterns that match optional plurals (s/es) for each term
+  const escapedTerms = sortedTerms.map(t => {
+    const escaped = t.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // If it ends with a word character, support optional plural forms like 's' or 'es'
+    if (/\w$/.test(escaped)) {
+      return `${escaped}(?:s|es)?`;
+    }
+    return escaped;
+  });
+  
+  if (escapedTerms.length === 0) return processed;
+
+  // Combined pattern: match existing markdown links, or glossary terms
+  const linkPattern = '(\\[[^\\]]*\\]\\([^)]*\\))';
+  const termPattern = `\\b(${escapedTerms.join('|')})\\b`;
+  const combinedRegex = new RegExp(`${linkPattern}|${termPattern}`, 'gi');
+
+  processed = processed.replace(combinedRegex, (match, link, term) => {
+    if (link) return link; 
+    // Find the original term by prefix matching (since matched term might have 's' or 'es' at the end)
+    const termObj = sortedTerms.find(t => 
+      term.toLowerCase() === t.term.toLowerCase() ||
+      term.toLowerCase().startsWith(t.term.toLowerCase())
+    );
+    return `[${term}](glossary:${encodeURIComponent(termObj?.term || term)})`;
   });
 
   return processed;
@@ -50,33 +95,83 @@ const linkifyCitations = (text: string) => {
 
 export default function ChatInterface() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [dynamicGlossary, setDynamicGlossary] = useState<GlossaryTerm[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isFocusMode, setIsFocusMode] = useState(false);
+  
+  // Auth and Firestore state
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<'signin' | 'signup'>('signin');
+  const [isSyncing, setIsSyncing] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Load sessions from localStorage on mount
+  // Auth state listener
   useEffect(() => {
-    const savedSessions = localStorage.getItem('deenseek_sessions');
-    if (savedSessions) {
-      try {
-        const parsed = JSON.parse(savedSessions);
-        setSessions(parsed);
-        if (parsed.length > 0) {
-          // Don't auto-select, let user start fresh or pick one
-        }
-      } catch (e) {
-        console.error("Failed to parse sessions", e);
-      }
-    }
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+    });
+    return () => unsubscribe();
   }, []);
 
-  // Save sessions to localStorage whenever they change
+  // Sync sessions with Firestore or localStorage based on Auth status
   useEffect(() => {
-    localStorage.setItem('deenseek_sessions', JSON.stringify(sessions));
-  }, [sessions]);
+    const savedGlossary = localStorage.getItem('deenseek_dynamic_glossary');
+    if (savedGlossary) {
+      try {
+        setDynamicGlossary(JSON.parse(savedGlossary));
+      } catch (e) {
+        console.error("Failed to parse dynamic glossary", e);
+      }
+    }
+
+    if (!currentUser) {
+      const savedSessions = localStorage.getItem('deenseek_sessions');
+      if (savedSessions) {
+        try {
+          setSessions(JSON.parse(savedSessions));
+        } catch (e) {
+          console.error("Failed to parse local sessions", e);
+        }
+      }
+      return;
+    }
+
+    setIsSyncing(true);
+    const unsubscribe = subscribeToUserSessions(currentUser.uid, (storedSessions) => {
+      setSessions(prev => {
+        return storedSessions.map(st => {
+          const existing = prev.find(p => p.id === st.id);
+          return {
+            id: st.id,
+            title: st.title,
+            messages: existing ? existing.messages : [],
+            timestamp: st.createdAt,
+            isArchived: existing?.isArchived || false
+          };
+        });
+      });
+      setIsSyncing(false);
+    });
+
+    return () => unsubscribe();
+  }, [currentUser]);
+
+  // Save sessions and dynamic glossary to localStorage whenever they change (for offline/guest)
+  useEffect(() => {
+    if (!currentUser) {
+      localStorage.setItem('deenseek_sessions', JSON.stringify(sessions));
+    }
+  }, [sessions, currentUser]);
+
+  useEffect(() => {
+    localStorage.setItem('deenseek_dynamic_glossary', JSON.stringify(dynamicGlossary));
+  }, [dynamicGlossary]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -88,55 +183,183 @@ export default function ChatInterface() {
     setMessages([]);
     setCurrentSessionId(null);
     setIsSidebarOpen(false);
+    setSuggestions([]);
   };
 
   const selectSession = (session: ChatSession) => {
-    setMessages(session.messages);
     setCurrentSessionId(session.id);
     setIsSidebarOpen(false);
+    setSuggestions([]);
+
+    if (currentUser) {
+      // Subscribe to messages in Firestore for this session
+      subscribeToSessionMessages(currentUser.uid, session.id, (msgs) => {
+        const formattedMsgs: Message[] = msgs.map(m => ({
+          role: (m.role === 'assistant' || (m.role as string) === 'model') ? 'model' : 'user',
+          text: m.content
+        }));
+        setMessages(formattedMsgs);
+        setSessions(prev => prev.map(s => s.id === session.id ? { ...s, messages: formattedMsgs } : s));
+      });
+    } else {
+      setMessages(session.messages);
+    }
   };
 
-  const deleteSession = (e: React.MouseEvent, id: string) => {
+  const deleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     setSessions(prev => prev.filter(s => s.id !== id));
+    if (currentUser) {
+      await deleteChatSession(currentUser.uid, id);
+    }
     if (currentSessionId === id) {
       startNewChat();
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+  const toggleArchiveSession = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    setSessions(prev => prev.map(s => 
+      s.id === id ? { ...s, isArchived: !s.isArchived } : s
+    ));
+    
+    // If we're archiving the current session, start a new chat or deselect
+    const sessionToToggle = sessions.find(s => s.id === id);
+    if (!sessionToToggle?.isArchived && currentSessionId === id) {
+      startNewChat();
+    }
+  };
 
-    const userMessage: Message = { role: 'user', text: input };
+  const handleSend = async (overrideInput?: string) => {
+    const textToSend = overrideInput || input;
+    if (!textToSend.trim() || isLoading) return;
+
+    const userMessage: Message = { role: 'user', text: textToSend };
     const newMessages = [...messages, userMessage];
     setMessages(newMessages);
     setInput('');
     setIsLoading(true);
+    setSuggestions([]);
 
-    const response = await chatWithDeenSeek(messages, input);
-    const aiMessage: Message = { role: 'model', text: response };
+    const response = await chatWithDeenSeek(messages, textToSend);
+    const { cleanText, suggestions: newSuggestions, terms: newTerms } = extractSuggestions(response);
+    
+    if (newTerms.length > 0) {
+      setDynamicGlossary(prev => {
+        const existingTerms = new Set([...glossaryData, ...prev].map(t => t.term.toLowerCase()));
+        const uniqueNewTerms = newTerms.filter(t => !existingTerms.has(t.term.toLowerCase()));
+        return [...prev, ...uniqueNewTerms];
+      });
+    }
+
+    const aiMessage: Message = { role: 'model', text: cleanText };
     const finalMessages = [...newMessages, aiMessage];
     
     setMessages(finalMessages);
+    setSuggestions(newSuggestions);
     setIsLoading(false);
 
-    // Update or create session
+    // Session Title
+    const activeSession = sessions.find(s => s.id === currentSessionId);
+    let sessionTitle = activeSession?.title || textToSend.slice(0, 30) + (textToSend.length > 30 ? '...' : '');
+
+    // Update or create session locally and in Firestore
     if (currentSessionId) {
-      setSessions(prev => prev.map(s => 
-        s.id === currentSessionId 
-          ? { ...s, messages: finalMessages, timestamp: Date.now() } 
-          : s
-      ));
+      setSessions(prev => {
+        const updatedSessions = prev.map(s => 
+          s.id === currentSessionId 
+            ? { ...s, messages: finalMessages, timestamp: Date.now() } 
+            : s
+        );
+
+        if (activeSession && activeSession.messages.filter(m => m.role === 'user').length === 1) {
+          generateChatTitle(finalMessages).then(async newTitle => {
+            setSessions(latest => latest.map(ls => 
+              ls.id === currentSessionId ? { ...ls, title: newTitle } : ls
+            ));
+            if (currentUser) {
+              await saveChatSession(currentUser.uid, {
+                id: currentSessionId,
+                title: newTitle,
+                createdAt: activeSession.timestamp
+              });
+            }
+          });
+        }
+        
+        return updatedSessions;
+      });
+
+      if (currentUser) {
+        await saveChatSession(currentUser.uid, {
+          id: currentSessionId,
+          title: sessionTitle,
+          createdAt: activeSession?.timestamp || Date.now()
+        });
+
+        // Save last user and assistant messages
+        await saveChatMessage(currentUser.uid, currentSessionId, {
+          id: Date.now().toString() + '-user',
+          role: 'user',
+          content: textToSend,
+          timestamp: Date.now() - 1000
+        });
+
+        await saveChatMessage(currentUser.uid, currentSessionId, {
+          id: Date.now().toString() + '-ai',
+          role: 'assistant',
+          content: cleanText,
+          timestamp: Date.now()
+        });
+      }
     } else {
       const newId = Date.now().toString();
       const newSession: ChatSession = {
         id: newId,
-        title: input.slice(0, 30) + (input.length > 30 ? '...' : ''),
+        title: sessionTitle,
         messages: finalMessages,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        isArchived: false
       };
       setSessions(prev => [newSession, ...prev]);
       setCurrentSessionId(newId);
+
+      if (currentUser) {
+        await saveChatSession(currentUser.uid, {
+          id: newId,
+          title: sessionTitle,
+          createdAt: newSession.timestamp
+        });
+
+        await saveChatMessage(currentUser.uid, newId, {
+          id: Date.now().toString() + '-user',
+          role: 'user',
+          content: textToSend,
+          timestamp: Date.now() - 1000
+        });
+
+        await saveChatMessage(currentUser.uid, newId, {
+          id: Date.now().toString() + '-ai',
+          role: 'assistant',
+          content: cleanText,
+          timestamp: Date.now()
+        });
+      }
+
+      // Generate title asynchronously after the first AI response
+      generateChatTitle(finalMessages).then(async newTitle => {
+        setSessions(prev => prev.map(s => 
+          s.id === newId ? { ...s, title: newTitle } : s
+        ));
+
+        if (currentUser) {
+          await saveChatSession(currentUser.uid, {
+            id: newId,
+            title: newTitle,
+            createdAt: newSession.timestamp
+          });
+        }
+      });
     }
   };
 
@@ -187,23 +410,186 @@ export default function ChatInterface() {
   const [showGlossary, setShowGlossary] = useState(false);
   const [glossarySearch, setGlossarySearch] = useState('');
   const [selectedTerm, setSelectedTerm] = useState<GlossaryTerm | null>(null);
+  const [selectedCitation, setSelectedCitation] = useState<CitationInfo | null>(null);
+  const [termRelevance, setTermRelevance] = useState<string | null>(null);
+  const [isRelevanceLoading, setIsRelevanceLoading] = useState(false);
   const [feedbackModal, setFeedbackModal] = useState<{
     messageIndex: number;
     type: 'up' | 'down';
   } | null>(null);
   const [feedbackComment, setFeedbackComment] = useState('');
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
   const isApiKeyMissing = !process.env.GEMINI_API_KEY;
 
-  const filteredGlossary = glossaryData.filter(item => 
+  const extractSuggestions = (text: string) => {
+    // Extract related questions
+    const relatedMatch = text.match(/<related>([\s\S]*?)<\/related>/);
+    let questions: string[] = [];
+    if (relatedMatch) {
+      questions = relatedMatch[1]
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+    }
+    
+    // Extract dynamic glossary terms
+    const termRegex = /<term>(.*?)<\/term>/g;
+    const terms: GlossaryTerm[] = [];
+    let match;
+    while ((match = termRegex.exec(text)) !== null) {
+      const parts = match[1].split('|');
+      if (parts.length >= 2) {
+        terms.push({
+          term: parts[0].trim(),
+          definition: parts[1].trim(),
+          category: (parts[2]?.trim() as any) || 'General'
+        });
+      }
+    }
+      
+    const cleanText = text
+      .replace(/<related>[\s\S]*?<\/related>/, '')
+      .replace(/<term>[\s\S]*?<\/term>/g, '')
+      .trim();
+
+    return { cleanText, suggestions: questions, terms };
+  };
+
+  useEffect(() => {
+    if (selectedTerm && messages.length > 0) {
+      setIsRelevanceLoading(true);
+      setTermRelevance(null);
+      generateTermRelevance(selectedTerm.term, selectedTerm.definition, messages)
+        .then(relevance => {
+          setTermRelevance(relevance);
+          setIsRelevanceLoading(false);
+        })
+        .catch(() => {
+          setTermRelevance("Unable to determine contextual relevance.");
+          setIsRelevanceLoading(false);
+        });
+    } else {
+      setTermRelevance(null);
+      setIsRelevanceLoading(false);
+    }
+  }, [selectedTerm, messages]);
+
+  const allGlossaryTerms = [...glossaryData, ...dynamicGlossary];
+
+  const filteredGlossary = allGlossaryTerms.filter(item => 
     item.term.toLowerCase().includes(glossarySearch.toLowerCase()) ||
     item.definition.toLowerCase().includes(glossarySearch.toLowerCase())
   );
+
+  const renderInspectorContent = (term: GlossaryTerm) => {
+    // Find related terms from the same category (excluding current term)
+    const relatedTerms = allGlossaryTerms
+      .filter(t => t.category === term.category && t.term.toLowerCase() !== term.term.toLowerCase())
+      .slice(0, 3);
+
+    return (
+      <div className="flex flex-col h-full bg-white text-[#1a1a1a]">
+        <div className="p-5 border-b border-[#e5e5e0] flex items-center justify-between bg-[#fdfcf7]">
+          <div className="flex items-center gap-2">
+            <BookOpen className="w-4 h-4 text-[#064e3b]" />
+            <span className="font-serif font-bold text-[#064e3b] text-base">Term Inspector</span>
+          </div>
+          <button 
+            onClick={() => setSelectedTerm(null)} 
+            className="p-1.5 hover:bg-[#f5f5f0] rounded-full text-[#4b5563] transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 flex-1 overflow-y-auto space-y-5">
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-xl font-serif font-bold text-[#064e3b] tracking-tight">{term.term}</h2>
+              <span className="text-[10px] uppercase tracking-widest font-bold text-[#d97706] bg-[#fffbeb] border border-[#fef08a] px-2 py-0.5 rounded">
+                {term.category}
+              </span>
+            </div>
+            <p className="text-sm text-[#4b5563] leading-relaxed bg-[#fdfcf7] p-4 rounded-xl border border-[#e5e5e0] font-medium">
+              {term.definition}
+            </p>
+          </div>
+
+          {(isRelevanceLoading || termRelevance) && (
+            <div className="space-y-2">
+              <h3 className="text-[10px] uppercase tracking-widest font-bold text-[#d97706] flex items-center gap-1">
+                <Sparkles className="w-3.5 h-3.5 text-[#d97706]" />
+                Contextual Relevance
+              </h3>
+              {isRelevanceLoading ? (
+                <div className="flex items-center gap-2 bg-[#fffbeb]/40 p-3 rounded-xl border border-[#fef08a]/50">
+                  <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 bg-[#d97706] rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                    <div className="w-1.5 h-1.5 bg-[#d97706] rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                    <div className="w-1.5 h-1.5 bg-[#d97706] rounded-full animate-bounce"></div>
+                  </div>
+                  <span className="text-[11px] text-[#92400e]">Analyzing conversation...</span>
+                </div>
+              ) : (
+                <div className="bg-[#fffbeb] p-3.5 rounded-xl border border-[#fef08a] shadow-sm relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-16 h-16 bg-amber-200/10 rounded-full blur-xl -z-10"></div>
+                  <p className="text-xs text-[#374151] italic leading-relaxed">
+                    {termRelevance}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <h3 className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Actions</h3>
+            <button
+              onClick={() => {
+                const prompt = `Can you explain the Islamic concept of "${term.term}" in more detail, especially regarding its practical application?`;
+                handleSend(prompt);
+                // On mobile, close it so the user sees the chat
+                if (window.innerWidth < 1280) {
+                  setSelectedTerm(null);
+                }
+              }}
+              className="w-full flex items-center justify-center gap-2 py-2.5 bg-[#064e3b] hover:bg-[#053e2f] text-white rounded-xl text-xs font-semibold transition-all shadow-md shadow-emerald-900/10 hover:shadow-emerald-900/20"
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              Ask DeenSeek about {term.term}
+            </button>
+          </div>
+
+          {relatedTerms.length > 0 && (
+            <div className="space-y-2 pt-2">
+              <h3 className="text-[10px] uppercase tracking-widest font-bold text-slate-400">Related {term.category} Terms</h3>
+              <div className="grid grid-cols-1 gap-1.5">
+                {relatedTerms.map(rt => (
+                  <button
+                    key={rt.term}
+                    onClick={() => setSelectedTerm(rt)}
+                    className="flex items-center justify-between p-2.5 rounded-xl border border-[#e5e5e0] hover:border-[#064e3b] hover:bg-[#f0fdf4] transition-all text-left"
+                  >
+                    <div className="truncate flex-1 mr-2">
+                      <p className="text-xs font-bold text-[#064e3b]">{rt.term}</p>
+                      <p className="text-[10px] text-[#9ca3af] truncate">{rt.definition}</p>
+                    </div>
+                    <BookOpen className="w-3.5 h-3.5 text-[#064e3b] opacity-40 shrink-0" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="flex h-screen bg-[#fdfcf7] text-[#1a1a1a] font-sans overflow-hidden">
       {/* Sidebar Overlay */}
       <AnimatePresence>
-        {isSidebarOpen && (
+        {isSidebarOpen && !isFocusMode && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -217,11 +603,11 @@ export default function ChatInterface() {
       {/* Sidebar */}
       <motion.aside
         initial={false}
-        animate={{ x: isSidebarOpen ? 0 : -320 }}
+        animate={{ x: (isSidebarOpen && !isFocusMode) ? 0 : -320 }}
         transition={{ type: 'spring', damping: 25, stiffness: 200 }}
         className={cn(
           "fixed inset-y-0 left-0 w-80 bg-white border-r border-[#e5e5e0] z-50 flex flex-col lg:relative lg:translate-x-0",
-          !isSidebarOpen && "lg:w-0 lg:border-none lg:overflow-hidden"
+          (!isSidebarOpen || isFocusMode) && "lg:hidden lg:w-0 lg:border-none lg:overflow-hidden"
         )}
       >
         <div className="p-6 border-b border-[#e5e5e0] flex items-center justify-between">
@@ -234,24 +620,52 @@ export default function ChatInterface() {
           </button>
         </div>
 
-        <div className="p-4">
+        <div className="p-4 flex gap-2">
           <button 
             onClick={startNewChat}
-            className="w-full flex items-center gap-3 px-4 py-3 bg-[#064e3b] text-white rounded-xl hover:bg-[#053e2f] transition-all shadow-md shadow-emerald-900/10"
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-[#064e3b] text-white rounded-xl hover:bg-[#053e2f] transition-all shadow-md shadow-emerald-900/10"
           >
             <Plus className="w-5 h-5" />
-            <span className="font-medium">New Conversation</span>
+            <span className="font-medium text-sm">New</span>
+          </button>
+          <button 
+            onClick={() => setShowArchived(!showArchived)}
+            className={cn(
+              "flex items-center justify-center gap-2 px-4 py-3 rounded-xl transition-all border",
+              showArchived 
+                ? "bg-[#d97706] border-[#d97706] text-white" 
+                : "bg-white border-[#e5e5e0] text-[#064e3b] hover:bg-[#f9f9f7]"
+            )}
+            title={showArchived ? "View Active Chats" : "View Archived Chats"}
+          >
+            {showArchived ? <RotateCcw className="w-5 h-5" /> : <Archive className="w-5 h-5" />}
           </button>
         </div>
 
+        <div className="px-4 mb-4">
+          <PrayerTimesCard />
+        </div>
+
+        <div className="px-6 py-2">
+          <h2 className="text-[10px] uppercase tracking-widest font-bold text-[#9ca3af]">
+            {showArchived ? "Archived Conversations" : "Recent Conversations"}
+          </h2>
+        </div>
+
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
-          {sessions.length === 0 ? (
+          {sessions.filter(s => !!s.isArchived === showArchived).length === 0 ? (
             <div className="text-center py-12 px-4">
-              <MessageSquare className="w-12 h-12 text-[#e5e5e0] mx-auto mb-4" />
-              <p className="text-sm text-[#9ca3af]">No previous conversations yet.</p>
+              {showArchived ? (
+                <Archive className="w-12 h-12 text-[#e5e5e0] mx-auto mb-4" />
+              ) : (
+                <MessageSquare className="w-12 h-12 text-[#e5e5e0] mx-auto mb-4" />
+              )}
+              <p className="text-sm text-[#9ca3af]">
+                {showArchived ? "No archived chats." : "No previous conversations yet."}
+              </p>
             </div>
           ) : (
-            sessions.map(session => (
+            sessions.filter(s => !!s.isArchived === showArchived).map(session => (
               <div
                 key={session.id}
                 onClick={() => selectSession(session)}
@@ -264,19 +678,86 @@ export default function ChatInterface() {
               >
                 <MessageSquare className="w-4 h-4 shrink-0" />
                 <span className="text-sm font-medium truncate flex-1">{session.title}</span>
-                <button 
-                  onClick={(e) => deleteSession(e, session.id)}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-600 transition-all"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                  <button 
+                    onClick={(e) => toggleArchiveSession(e, session.id)}
+                    className="p-1 hover:text-[#064e3b] transition-all"
+                    title={session.isArchived ? "Unarchive" : "Archive"}
+                  >
+                    {session.isArchived ? <RotateCcw className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
+                  </button>
+                  <button 
+                    onClick={(e) => deleteSession(e, session.id)}
+                    className="p-1 hover:text-red-600 transition-all"
+                    title="Delete"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             ))
           )}
         </div>
 
-        <div className="p-6 border-t border-[#e5e5e0] bg-[#fdfcf7]">
-          <p className="text-[10px] text-[#9ca3af] uppercase tracking-widest font-bold text-center">
+        <div className="p-4 border-t border-[#e5e5e0] bg-[#fdfcf7] space-y-3">
+          {currentUser ? (
+            <div className="p-3 bg-white border border-[#e5e5e0] rounded-2xl shadow-xs space-y-2.5">
+              <div className="flex items-center gap-3">
+                {currentUser.photoURL ? (
+                  <img src={currentUser.photoURL} alt={currentUser.displayName || 'User'} className="w-9 h-9 rounded-full object-cover border border-[#e5e5e0]" />
+                ) : (
+                  <div className="w-9 h-9 rounded-full bg-[#064e3b] text-white flex items-center justify-center font-bold text-sm">
+                    {(currentUser.displayName || currentUser.email || 'U').charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold text-[#064e3b] truncate">
+                    {currentUser.displayName || 'User'}
+                  </p>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {currentUser.email}
+                  </p>
+                </div>
+              </div>
+              
+              <div className="flex items-center justify-between text-[10px] text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg">
+                <span className="flex items-center gap-1 font-semibold">
+                  <Cloud className="w-3 h-3" /> Cloud Synced
+                </span>
+                {isSyncing && <span className="animate-pulse">Syncing...</span>}
+              </div>
+
+              <button
+                onClick={() => firebaseSignOut(auth)}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-xl transition-colors font-medium border border-transparent hover:border-red-100"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Sign Out</span>
+              </button>
+            </div>
+          ) : (
+            <div className="p-3 bg-gradient-to-b from-[#f0fdf4] to-white border border-[#dcfce7] rounded-2xl space-y-2">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-[#064e3b]">
+                <Cloud className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Save Chat History</span>
+              </div>
+              <p className="text-[11px] text-gray-600 leading-snug">
+                Sign in with Google to keep your Islamic chat history saved safely in the cloud.
+              </p>
+              <button
+                onClick={() => {
+                  setAuthModalMode('signin');
+                  setIsAuthModalOpen(true);
+                }}
+                className="w-full mt-1 flex items-center justify-center gap-2 py-2 bg-[#064e3b] hover:bg-[#053e2f] text-white text-xs font-semibold rounded-xl transition-all shadow-sm shadow-emerald-900/10"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Sign In / Register</span>
+              </button>
+            </div>
+          )}
+
+          <p className="text-[10px] text-[#9ca3af] uppercase tracking-widest font-bold text-center pt-1">
             DeenSeek AI v1.0
           </p>
         </div>
@@ -287,18 +768,28 @@ export default function ChatInterface() {
         {/* Header */}
         <header className="border-b border-[#e5e5e0] bg-white/80 backdrop-blur-md sticky top-0 z-10 px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <button 
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              className="p-2 hover:bg-[#f5f5f0] rounded-full transition-colors text-[#064e3b]"
-            >
-              <Menu className="w-6 h-6" />
-            </button>
+            {!isFocusMode && (
+              <button 
+                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                className="p-2 hover:bg-[#f5f5f0] rounded-full transition-colors text-[#064e3b]"
+                title="Toggle Sidebar"
+              >
+                <Menu className="w-6 h-6" />
+              </button>
+            )}
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-[#064e3b] rounded-xl flex items-center justify-center shadow-lg shadow-emerald-900/10">
                 <BookOpen className="text-[#fefce8] w-6 h-6" />
               </div>
               <div>
-                <h1 className="text-xl font-semibold tracking-tight text-[#064e3b]">DeenSeek</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-xl font-semibold tracking-tight text-[#064e3b]">DeenSeek</h1>
+                  {isFocusMode && (
+                    <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold bg-[#064e3b]/10 text-[#064e3b] px-2 py-0.5 rounded-full">
+                      Focus Reading
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-[#d97706] opacity-80">Verified Islamic Knowledge</p>
                   {isApiKeyMissing && (
@@ -311,6 +802,19 @@ export default function ChatInterface() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button 
+              onClick={() => setIsFocusMode(!isFocusMode)}
+              title={isFocusMode ? "Exit Focus Reading" : "Focus Reading Mode"}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border shadow-sm",
+                isFocusMode
+                  ? "bg-[#064e3b] text-white border-[#064e3b] hover:bg-[#053e2f] shadow-emerald-900/20"
+                  : "bg-[#f5f5f0] text-[#064e3b] border-[#e5e5e0] hover:bg-[#e8e8e2]"
+              )}
+            >
+              {isFocusMode ? <EyeOff className="w-4 h-4 text-amber-300" /> : <Eye className="w-4 h-4 text-[#064e3b]" />}
+              <span className="hidden sm:inline">{isFocusMode ? "Exit Focus" : "Focus Reading"}</span>
+            </button>
             <button 
               onClick={() => setShowGlossary(true)}
               title="Islamic Glossary"
@@ -346,6 +850,37 @@ export default function ChatInterface() {
             >
               <Info className="w-5 h-5" />
             </button>
+
+            {/* Account Sign In / User Profile Button */}
+            {currentUser ? (
+              <button
+                onClick={() => setIsSidebarOpen(true)}
+                className="flex items-center gap-2 p-1.5 pl-2 pr-3 bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200 rounded-full transition-all text-[#064e3b]"
+                title={`Signed in as ${currentUser.displayName || currentUser.email}`}
+              >
+                {currentUser.photoURL ? (
+                  <img src={currentUser.photoURL} alt="Profile" className="w-6 h-6 rounded-full object-cover" />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-[#064e3b] text-white flex items-center justify-center font-bold text-xs">
+                    {(currentUser.displayName || currentUser.email || 'U').charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <span className="text-xs font-semibold max-w-[100px] truncate hidden sm:inline">
+                  {currentUser.displayName || 'Account'}
+                </span>
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  setAuthModalMode('signin');
+                  setIsAuthModalOpen(true);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#064e3b] hover:bg-[#053e2f] text-white rounded-full text-xs font-semibold transition-all shadow-xs"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Sign In</span>
+              </button>
+            )}
           </div>
         </header>
 
@@ -449,9 +984,10 @@ export default function ChatInterface() {
                   </div>
                 ) : (
                   filteredGlossary.map(item => (
-                    <div 
+                    <button 
                       key={item.term}
-                      className="p-4 rounded-2xl border border-[#e5e5e0] hover:border-[#064e3b] hover:bg-[#f0fdf4] transition-all group"
+                      onClick={() => setSelectedTerm(item)}
+                      className="w-full text-left p-4 rounded-2xl border border-[#e5e5e0] hover:border-[#064e3b] hover:bg-[#f0fdf4] transition-all group"
                     >
                       <div className="flex items-center justify-between mb-1">
                         <h4 className="font-bold text-[#064e3b]">{item.term}</h4>
@@ -459,8 +995,8 @@ export default function ChatInterface() {
                           {item.category}
                         </span>
                       </div>
-                      <p className="text-sm text-[#4b5563] leading-relaxed">{item.definition}</p>
-                    </div>
+                      <p className="text-sm text-[#4b5563] leading-relaxed line-clamp-2">{item.definition}</p>
+                    </button>
                   ))
                 )}
               </div>
@@ -469,43 +1005,24 @@ export default function ChatInterface() {
         )}
       </AnimatePresence>
 
-      {/* Term Definition Modal */}
+      {/* Responsive Overlay Drawer/Modal (Mobile & Tablet) */}
       <AnimatePresence>
         {selectedTerm && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/10 backdrop-blur-[2px]"
-            onClick={() => setSelectedTerm(null)}
-          >
-            <motion.div 
-              initial={{ y: 20, opacity: 0 }}
+          <div className="xl:hidden fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/20 backdrop-blur-[2px]">
+            {/* Backdrop click */}
+            <div className="absolute inset-0" onClick={() => setSelectedTerm(null)} />
+            
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
-              exit={{ y: 20, opacity: 0 }}
-              className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[#e5e5e0]"
+              exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="relative w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl shadow-2xl border border-[#e5e5e0] overflow-hidden max-h-[85vh] sm:max-h-[80vh] flex flex-col z-10"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <Book className="w-4 h-4 text-[#064e3b]" />
-                  <h4 className="font-bold text-[#064e3b]">{selectedTerm.term}</h4>
-                </div>
-                <span className="text-[10px] uppercase tracking-widest font-bold text-[#d97706] bg-[#fffbeb] px-2 py-0.5 rounded">
-                  {selectedTerm.category}
-                </span>
-              </div>
-              <p className="text-sm text-[#4b5563] leading-relaxed mb-4">
-                {selectedTerm.definition}
-              </p>
-              <button 
-                onClick={() => setSelectedTerm(null)}
-                className="w-full py-2 bg-[#064e3b] text-white rounded-lg text-sm font-medium hover:bg-[#053e2f] transition-colors"
-              >
-                Close
-              </button>
+              {renderInspectorContent(selectedTerm)}
             </motion.div>
-          </motion.div>
+          </div>
         )}
       </AnimatePresence>
 
@@ -564,6 +1081,26 @@ export default function ChatInterface() {
       {/* Main Chat Area */}
       <main className="flex-1 overflow-y-auto px-4 py-8 md:px-0" ref={scrollRef}>
         <div className="max-w-3xl mx-auto space-y-8">
+          {isFocusMode && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-[#f0fdf4] border border-[#bbf7d0] rounded-2xl p-3.5 flex items-center justify-between shadow-sm"
+            >
+              <div className="flex items-center gap-2 text-xs font-medium text-[#064e3b]">
+                <Eye className="w-4 h-4 text-[#064e3b]" />
+                <span><strong>Focus Reading Mode</strong> — Distraction-free view of conversation thread</span>
+              </div>
+              <button
+                onClick={() => setIsFocusMode(false)}
+                className="text-xs font-bold text-[#064e3b] hover:underline flex items-center gap-1"
+              >
+                <EyeOff className="w-3.5 h-3.5" />
+                Exit
+              </button>
+            </motion.div>
+          )}
+
           {messages.length === 0 && (
             <motion.div 
               initial={{ opacity: 0, y: 20 }}
@@ -571,8 +1108,8 @@ export default function ChatInterface() {
               className="text-center space-y-6 py-12"
             >
               <div className="inline-flex items-center gap-2 px-4 py-2 bg-[#fefce8] border border-[#fef08a] rounded-full text-[#854d0e] text-sm font-medium">
-                <ShieldCheck className="w-4 h-4" />
-                Shariah-Compliant AI
+                <UserIcon className="w-4 h-4" />
+                As-salamu alaykum{currentUser?.displayName ? `, ${currentUser.displayName}` : ''}
               </div>
               <h2 className="text-4xl font-serif font-medium text-[#064e3b] leading-tight">
                 Seeking Knowledge with <br />
@@ -591,7 +1128,7 @@ export default function ChatInterface() {
                 ].map((q) => (
                   <button 
                     key={q}
-                    onClick={() => setInput(q)}
+                    onClick={() => handleSend(q)}
                     className="p-4 bg-white border border-[#e5e5e0] rounded-2xl text-left hover:border-[#064e3b] hover:bg-[#f0fdf4] transition-all group"
                   >
                     <p className="text-sm font-medium text-[#374151] group-hover:text-[#064e3b]">{q}</p>
@@ -616,7 +1153,7 @@ export default function ChatInterface() {
                   "w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1 shadow-sm",
                   msg.role === 'user' ? "bg-[#d97706]" : "bg-[#064e3b]"
                 )}>
-                  {msg.role === 'user' ? <User className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-white" />}
+                  {msg.role === 'user' ? <UserIcon className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-white" />}
                 </div>
                 <div className={cn(
                   "max-w-[85%] p-4 rounded-2xl shadow-sm leading-relaxed",
@@ -629,20 +1166,49 @@ export default function ChatInterface() {
                     msg.role === 'user' ? "text-white" : "text-[#374151]"
                   )}>
                     <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
                       components={{
                         a: ({ node, ...props }) => {
-                          if (props.href?.startsWith('glossary:')) {
-                            const termName = props.href.replace('glossary:', '');
-                            const term = glossaryData.find(t => t.term.toLowerCase() === termName.toLowerCase());
+                          const href = props.href || '';
+                          const isGlossary = href.startsWith('glossary:');
+                          const isCitation = href.startsWith('cite:');
+
+                          if (isCitation) {
+                            return (
+                              <CitationBadge
+                                citationKey={href}
+                                label={props.children}
+                                onSelect={(citation) => setSelectedCitation(citation)}
+                              />
+                            );
+                          }
+
+                          if (isGlossary || !href.startsWith('http')) {
+                            const termName = isGlossary 
+                              ? decodeURIComponent(href.replace('glossary:', ''))
+                              : href;
+                              
+                            const term = allGlossaryTerms.find(t => 
+                              t.term.toLowerCase() === termName.toLowerCase() ||
+                              t.term.toLowerCase() === decodeURIComponent(termName).toLowerCase()
+                            );
+
                             return (
                               <button
-                                onClick={() => setSelectedTerm(term || null)}
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setSelectedTerm(term || null);
+                                }}
                                 className="inline-flex items-center gap-1 px-1 py-0 bg-[#f0fdf4] border-b-2 border-[#064e3b]/20 text-[#064e3b] font-medium hover:bg-[#dcfce7] transition-colors cursor-help rounded-sm"
                               >
                                 {props.children}
+                                <BookOpen className="w-3 h-3 opacity-50" />
                               </button>
                             );
                           }
+                          
                           return (
                             <a
                               {...props}
@@ -669,7 +1235,7 @@ export default function ChatInterface() {
                         )
                       }}
                     >
-                      {linkifyCitations(msg.text)}
+                      {linkifyCitations(msg.text, dynamicGlossary)}
                     </ReactMarkdown>
                   </div>
                   
@@ -715,6 +1281,24 @@ export default function ChatInterface() {
             ))}
           </AnimatePresence>
 
+          {suggestions.length > 0 && !isLoading && !isFocusMode && (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="flex flex-wrap gap-2 justify-start ml-12"
+            >
+              {suggestions.map((q, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleSend(q)}
+                  className="px-4 py-2 bg-white border border-[#e5e5e0] rounded-full text-xs font-medium text-[#064e3b] hover:border-[#064e3b] hover:bg-[#f0fdf4] transition-all shadow-sm"
+                >
+                  {q}
+                </button>
+              ))}
+            </motion.div>
+          )}
+
           {isLoading && (
             <motion.div
               initial={{ opacity: 0, y: 10 }}
@@ -746,50 +1330,97 @@ export default function ChatInterface() {
               </div>
             </motion.div>
           )}
+
+          {isFocusMode && messages.length > 0 && (
+            <div className="pt-6 pb-10 text-center">
+              <button
+                onClick={() => setIsFocusMode(false)}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#064e3b] text-white text-xs font-medium rounded-full hover:bg-[#053e2f] transition-all shadow-md shadow-emerald-900/10"
+              >
+                <EyeOff className="w-4 h-4 text-amber-300" />
+                Exit Focus Reading & Return to Chat
+              </button>
+            </div>
+          )}
         </div>
       </main>
 
       {/* Disclaimer Banner (Sticky above input) */}
-      <div className="max-w-3xl mx-auto w-full px-4 mb-2">
-        <div className="bg-[#fffbeb] border border-[#fef3c7] rounded-xl p-3 flex items-start gap-3">
-          <AlertTriangle className="w-5 h-5 text-[#d97706] shrink-0 mt-0.5" />
-          <p className="text-[11px] text-[#92400e] leading-normal">
-            <strong>Disclaimer:</strong> DeenSeek is an AI assistant, not a qualified scholar. 
-            Information provided is for educational purposes. For binding religious rulings (fatwas), 
-            please consult a qualified Mufti or scholar.
-          </p>
+      {!isFocusMode && (
+        <div className="max-w-3xl mx-auto w-full px-4 mb-2">
+          <div className="bg-[#fffbeb] border border-[#fef3c7] rounded-xl p-3 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-[#d97706] shrink-0 mt-0.5" />
+            <p className="text-[11px] text-[#92400e] leading-normal">
+              <strong>Disclaimer:</strong> DeenSeek is an AI assistant, not a qualified scholar. 
+              Information provided is for educational purposes. For binding religious rulings (fatwas), 
+              please consult a qualified Mufti or scholar.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Input Area */}
-      <footer className="p-4 md:p-6 bg-white border-t border-[#e5e5e0]">
-        <div className="max-w-3xl mx-auto relative">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            placeholder="Ask a question about Islam..."
-            className="w-full bg-[#f9f9f7] border border-[#e5e5e0] rounded-2xl px-5 py-4 pr-14 focus:outline-none focus:ring-2 focus:ring-[#064e3b]/20 focus:border-[#064e3b] transition-all resize-none min-h-[60px] max-h-[200px]"
-            rows={1}
-          />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isLoading}
-            className="absolute right-3 bottom-3 p-2.5 bg-[#064e3b] text-white rounded-xl hover:bg-[#053e2f] disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md shadow-emerald-900/20"
-          >
-            <Send className="w-5 h-5" />
-          </button>
-        </div>
-        <p className="text-center text-[10px] text-[#9ca3af] mt-3 uppercase tracking-widest font-medium">
-          Powered by DeenSeek AI • Ethical & Shariah-Compliant
-        </p>
-      </footer>
+      {!isFocusMode && (
+        <footer className="p-4 md:p-6 bg-white border-t border-[#e5e5e0]">
+          <div className="max-w-3xl mx-auto relative">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              placeholder="Ask a question about Islam..."
+              className="w-full bg-[#f9f9f7] border border-[#e5e5e0] rounded-2xl px-5 py-4 pr-14 focus:outline-none focus:ring-2 focus:ring-[#064e3b]/20 focus:border-[#064e3b] transition-all resize-none min-h-[60px] max-h-[200px]"
+              rows={1}
+            />
+            <button
+              onClick={() => handleSend()}
+              disabled={!input.trim() || isLoading}
+              className="absolute right-3 bottom-3 p-2.5 bg-[#064e3b] text-white rounded-xl hover:bg-[#053e2f] disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md shadow-emerald-900/20"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </div>
+          <p className="text-center text-[10px] text-[#9ca3af] mt-3 uppercase tracking-widest font-medium">
+            Powered by DeenSeek AI • Ethical & Shariah-Compliant
+          </p>
+        </footer>
+      )}
     </div>
+
+    {/* Right Side Glossary Term Inspector (Desktop) */}
+    <AnimatePresence>
+      {selectedTerm && (
+        <motion.div
+          initial={{ width: 0, opacity: 0 }}
+          animate={{ width: 380, opacity: 1 }}
+          exit={{ width: 0, opacity: 0 }}
+          transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+          className="hidden xl:flex bg-white border-l border-[#e5e5e0] flex-col z-30 shadow-xl overflow-hidden shrink-0 h-full"
+        >
+          <div className="w-[380px] h-full flex flex-col">
+            {renderInspectorContent(selectedTerm)}
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+
+    {/* Citation Details & Source Inspector Modal */}
+    <CitationModal
+      citation={selectedCitation}
+      onClose={() => setSelectedCitation(null)}
+      onAskAI={(prompt) => handleSend(prompt)}
+    />
+
+    {/* Firebase Auth Modal */}
+    <AuthModal
+      isOpen={isAuthModalOpen}
+      onClose={() => setIsAuthModalOpen(false)}
+      initialMode={authModalMode}
+    />
   </div>
   );
 }

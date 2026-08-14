@@ -53,3 +53,27 @@
 .prose hr {
   @apply my-6 border-[#e5e5e0];
 }
+
+.prose table {
+  @apply w-full border-collapse my-6 text-sm overflow-hidden rounded-xl border border-[#e5e5e0];
+}
+
+.prose thead {
+  @apply bg-[#f0fdf4] border-b border-[#e5e5e0];
+}
+
+.prose th {
+  @apply px-4 py-3 text-left font-bold text-[#064e3b] uppercase tracking-wider text-[10px];
+}
+
+.prose td {
+  @apply px-4 py-3 border-b border-[#e5e5e0] text-[#4b5563];
+}
+
+.prose tr:last-child td {
+  @apply border-b-0;
+}
+
+.prose tr:nth-child(even) {
+  @apply bg-[#f9f9f7]/50;
+}
