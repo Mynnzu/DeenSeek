@@ -93,6 +93,94 @@ const linkifyCitations = (text: string | undefined, dynamicTerms?: GlossaryTerm[
   return processed;
 };
 
+function GeminiLoadingIndicator() {
+  const [stepIndex, setStepIndex] = useState(0);
+  const steps = [
+    "Consulting Qur'an & authentic Hadith collections...",
+    "Cross-referencing scholarly consensus (Ijma)...",
+    "Structuring source-verified response & citations..."
+  ];
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setStepIndex((prev) => (prev + 1) % steps.length);
+    }, 2400);
+    return () => clearInterval(interval);
+  }, [steps.length]);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      transition={{ duration: 0.3 }}
+      className="flex gap-3.5 max-w-xl w-full"
+    >
+      {/* Gemini Rotating Luminous Star Avatar */}
+      <div className="relative w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5 shadow-sm bg-gradient-to-tr from-[#064e3b] via-[#0d9488] to-[#d97706] p-[1.5px]">
+        <div className="w-full h-full bg-[#064e3b] rounded-full flex items-center justify-center overflow-hidden">
+          <motion.div
+            animate={{
+              rotate: [0, 180, 360],
+              scale: [1, 1.18, 1],
+            }}
+            transition={{
+              duration: 3.5,
+              repeat: Infinity,
+              ease: "easeInOut",
+            }}
+            className="flex items-center justify-center"
+          >
+            <Sparkles className="w-4 h-4 text-amber-300 drop-shadow-sm" />
+          </motion.div>
+        </div>
+      </div>
+
+      {/* Gemini Shimmering Loading Bubble */}
+      <div className="flex-1 bg-white border border-[#e5e5e0] p-4 rounded-2xl rounded-tl-none shadow-sm relative overflow-hidden">
+        {/* Animated Top Gradient Accent Bar */}
+        <div className="absolute top-0 left-0 right-0 h-[2px] gemini-shimmer-line opacity-90" />
+
+        {/* Dynamic Status Phase */}
+        <div className="flex items-center gap-2 mb-3">
+          <motion.div
+            animate={{
+              scale: [1, 1.35, 1],
+              opacity: [0.6, 1, 0.6],
+            }}
+            transition={{
+              duration: 1.4,
+              repeat: Infinity,
+              ease: "easeInOut",
+            }}
+            className="w-2 h-2 rounded-full bg-gradient-to-r from-[#064e3b] via-[#0d9488] to-[#d97706]"
+          />
+          
+          <AnimatePresence mode="wait">
+            <motion.span
+              key={stepIndex}
+              initial={{ opacity: 0, y: 3 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -3 }}
+              transition={{ duration: 0.25 }}
+              className="text-xs font-semibold gemini-shimmer-text tracking-tight"
+            >
+              {steps[stepIndex]}
+            </motion.span>
+          </AnimatePresence>
+        </div>
+
+        {/* Gemini Shimmer Skeleton Bars */}
+        <div className="space-y-2 pt-0.5">
+          <div className="h-2.5 w-[92%] rounded-full gemini-shimmer-line" />
+          <div className="h-2.5 w-[76%] rounded-full gemini-shimmer-line" />
+          <div className="h-2.5 w-[52%] rounded-full gemini-shimmer-line" />
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 export default function ChatInterface() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [dynamicGlossary, setDynamicGlossary] = useState<GlossaryTerm[]>([]);
@@ -1299,37 +1387,7 @@ export default function ChatInterface() {
             </motion.div>
           )}
 
-          {isLoading && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="flex gap-4"
-            >
-              <div className="w-8 h-8 rounded-full bg-[#064e3b] flex items-center justify-center shrink-0 mt-1 shadow-sm">
-                <Bot className="w-5 h-5 text-white" />
-              </div>
-              <div className="bg-white border border-[#e5e5e0] p-4 rounded-2xl rounded-tl-none shadow-sm flex items-center gap-2">
-                <div className="flex gap-1">
-                  <motion.div
-                    animate={{ scale: [1, 1.2, 1] }}
-                    transition={{ repeat: Infinity, duration: 1, delay: 0 }}
-                    className="w-2 h-2 bg-[#064e3b] rounded-full"
-                  />
-                  <motion.div
-                    animate={{ scale: [1, 1.2, 1] }}
-                    transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
-                    className="w-2 h-2 bg-[#064e3b] rounded-full"
-                  />
-                  <motion.div
-                    animate={{ scale: [1, 1.2, 1] }}
-                    transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
-                    className="w-2 h-2 bg-[#064e3b] rounded-full"
-                  />
-                </div>
-                <span className="text-xs font-medium text-[#4b5563] ml-2">DeenSeek is searching sources...</span>
-              </div>
-            </motion.div>
-          )}
+          {isLoading && <GeminiLoadingIndicator />}
 
           {isFocusMode && messages.length > 0 && (
             <div className="pt-6 pb-10 text-center">

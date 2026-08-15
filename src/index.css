@@ -77,3 +77,52 @@
 .prose tr:nth-child(even) {
   @apply bg-[#f9f9f7]/50;
 }
+
+@keyframes geminiShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes geminiGlowPulse {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(0.98);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.02);
+  }
+}
+
+.gemini-shimmer-line {
+  background: linear-gradient(
+    90deg,
+    rgba(240, 253, 244, 0.8) 0%,
+    rgba(220, 252, 231, 0.9) 20%,
+    rgba(254, 243, 199, 0.95) 45%,
+    rgba(204, 251, 241, 0.9) 65%,
+    rgba(240, 253, 244, 0.8) 100%
+  );
+  background-size: 250% 100%;
+  animation: geminiShimmer 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.gemini-shimmer-text {
+  background: linear-gradient(
+    90deg,
+    #064e3b 0%,
+    #0d9488 25%,
+    #d97706 50%,
+    #064e3b 75%,
+    #0d9488 100%
+  );
+  background-size: 200% auto;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: geminiShimmer 3s linear infinite;
+}
